@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Thin passthrough proxy for Z.ai GLM API.
+Simple passthrough proxy for OpenAI + Anthropic APIs.
 
-Maps:  http://localhost:4343/v1/{path} → {UPSTREAM_BASE}/{path}
+Maps:
+  - http://localhost:4343/openai/{path}    → {OPENAI_UPSTREAM}/{path}
+  - http://localhost:4343/anthropic/{path} → {ANTHROPIC_UPSTREAM}/{path}
+
+Drop-in replacement: wherever you used https://api.z.ai/api/coding/paas/v4,
+now use http://localhost:4343/openai — same for anthropic.
 
 Bits in, bits out. No transformation. Supports streaming.
-Logs request/response metadata + JSON bodies to .cache/.
+Logs request/response metadata + JSON bodies to .cache/logs/.
 """
 
 import json
@@ -13,9 +18,12 @@ import os
 import time
 import traceback
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import httpx
+import portalocker
 import typer
 import uvicorn
 from dotenv import load_dotenv
@@ -30,13 +38,16 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-UPSTREAM_BASE = os.environ.get(
-    "GLM_UPSTREAM_BASE", "https://api.z.ai/api/coding/paas/v4"
+OPENAI_UPSTREAM = os.environ.get(
+    "OPENAI_UPSTREAM_BASE", os.environ.get("GLM_UPSTREAM_BASE", "https://api.z.ai/api/coding/paas/v4")
+).rstrip("/")
+
+ANTHROPIC_UPSTREAM = os.environ.get(
+    "ANTHROPIC_UPSTREAM_BASE", "https://api.z.ai/api/anthropic"
 ).rstrip("/")
 
 # If set, every request gets this key injected as Authorization: Bearer <key>
-# If not set, caller must supply their own Authorization header.
-DEFAULT_API_KEY = os.environ.get("Z_AI_API_KEY", "")
+DEFAULT_API_KEY = os.environ.get("Z_AI_API_KEY", os.environ.get("API_KEY", ""))
 
 
 def _get_api_key() -> str:
@@ -46,23 +57,55 @@ def _get_api_key() -> str:
         DEFAULT_API_KEY = os.environ.get("Z_AI_API_KEY", "")
     return DEFAULT_API_KEY
 
-LOG_DIR = Path(".cache")
-LOG_DIR.mkdir(exist_ok=True)
+
+LOG_DIR = Path(".cache/logs")
+
+
+def _get_hour_folder() -> Path:
+    """Get current hour folder path."""
+    now = datetime.now()
+    date_str = now.strftime("%y%m%d_%H")
+    folder = LOG_DIR / date_str
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _get_next_sequence(folder: Path) -> int:
+    """Get next sequence number using file locking."""
+    counter_file = folder / "counter.txt"
+
+    if not counter_file.exists():
+        counter_file.write_text("0\n")
+
+    try:
+        with open(counter_file, "r+") as f:
+            portalocker.lock(f, portalocker.LOCK_EX)
+            f.seek(0)
+            content = f.read().strip()
+            current = int(content) if content else 0
+            next_seq = current + 1
+            f.seek(0)
+            f.write(str(next_seq) + "\n")
+            f.truncate()
+            return next_seq
+    except Exception as e:
+        logger.error(f"Failed to get next sequence: {e}")
+        fallback = len(list(folder.glob("*.json"))) + 1
+        logger.warning(f"Using fallback sequence number: {fallback}")
+        return fallback
+
 
 # Only forward these headers to upstream (whitelist approach)
 _FORWARD_HEADERS = frozenset({
-    "content-type", "accept", "authorization",
+    "content-type", "accept", "authorization", "x-api-key",
 })
 
 
 def _clean_headers(raw: dict[str, str]) -> dict[str, str]:
-    # Normalize to lowercase keys to avoid duplicate headers (HTTP headers are case-insensitive)
     out = {k.lower(): v for k, v in raw.items() if k.lower() in _FORWARD_HEADERS}
-    # Always inject API key if available (overrides caller's header)
     api_key = _get_api_key()
     if api_key:
         out["authorization"] = f"Bearer {api_key}"
-    # Ensure content-type is set for JSON bodies
     if "content-type" not in out:
         out["content-type"] = "application/json"
     return out
@@ -82,7 +125,6 @@ def _safe_json(data: bytes) -> dict | list | None:
 # ---------------------------------------------------------------------------
 from contextlib import asynccontextmanager
 
-# Single async client for connection pooling — timeout=None for long streams
 _client: httpx.AsyncClient | None = None
 
 
@@ -94,7 +136,15 @@ async def _lifespan(app: FastAPI):
     await _client.aclose()
 
 
-app = FastAPI(title="GLM Passthrough Proxy", lifespan=_lifespan)
+app = FastAPI(
+    title="Passthrough Proxy",
+    description=(
+        f"OpenAI: /openai/... → {OPENAI_UPSTREAM}/...\n"
+        f"Anthropic: /anthropic/... → {ANTHROPIC_UPSTREAM}/..."
+    ),
+    version="1.0.0",
+    lifespan=_lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -103,27 +153,84 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
+@app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "healthy", "upstream": UPSTREAM_BASE}
+    return {
+        "status": "healthy",
+        "openai_upstream": OPENAI_UPSTREAM,
+        "anthropic_upstream": ANTHROPIC_UPSTREAM,
+    }
 
 
 # ---------------------------------------------------------------------------
-# Core proxy helper — all explicit routes delegate here
+# Two simple catch-all routes
 # ---------------------------------------------------------------------------
-async def _proxy_request(request: Request, path: str):
-    """Forward request to upstream and return response."""
+@app.api_route(
+    "/openai/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    summary="Proxy to OpenAI-compatible upstream",
+    tags=["OpenAI"],
+)
+async def proxy_openai(request: Request, path: str):
+    """Forward /openai/{path} → OPENAI_UPSTREAM/{path}, stripping v1/ prefix since upstream has its own version."""
+    # Strip v1/ prefix — upstream base URL already includes versioning (e.g. /v4)
+    if path.startswith("v1/"):
+        path = path[3:]
+    return await _proxy_request(request, path, OPENAI_UPSTREAM)
+
+
+@app.api_route(
+    "/anthropic/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    summary="Proxy to Anthropic-compatible upstream",
+    tags=["Anthropic"],
+)
+async def proxy_anthropic(request: Request, path: str):
+    """Forward /anthropic/{path} → ANTHROPIC_UPSTREAM/{path}"""
+    return await _proxy_request(request, path, ANTHROPIC_UPSTREAM)
+
+# ---------------------------------------------------------------------------
+# Root-level v1 routes for tools expecting standard paths
+# ---------------------------------------------------------------------------
+@app.api_route(
+    "/v1/messages{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    summary="Direct Anthropic v1/messages proxy",
+    tags=["Anthropic Root"],
+)
+async def proxy_anthropic_root(request: Request, path: str = ""):
+    """Forward /v1/messages... → ANTHROPIC_UPSTREAM/v1/messages..."""
+    # Construct the full path to forward, handling query params in _proxy_request
+    forward_path = f"v1/messages{path}"
+    return await _proxy_request(request, forward_path, ANTHROPIC_UPSTREAM)
+
+@app.api_route(
+    "/v1/complete{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    summary="Direct Anthropic v1/complete proxy",
+    tags=["Anthropic Root"],
+)
+async def proxy_anthropic_complete(request: Request, path: str = ""):
+    """Forward /v1/complete... → ANTHROPIC_UPSTREAM/v1/complete..."""
+    forward_path = f"v1/complete{path}"
+    return await _proxy_request(request, forward_path, ANTHROPIC_UPSTREAM)
+
+
+# ---------------------------------------------------------------------------
+# Core proxy helper
+# ---------------------------------------------------------------------------
+async def _proxy_request(request: Request, path: str, base_url: str):
     req_id = str(uuid.uuid4())[:8]
     started = time.time()
 
-    upstream_url = f"{UPSTREAM_BASE}/{path}"
+    upstream_url = f"{base_url}/{path}"
     if request.url.query:
         upstream_url += f"?{request.url.query}"
 
     body = await request.body()
     out_headers = _clean_headers(dict(request.headers))
 
-    logger.info(f"[{req_id}] {request.method} /v1/{path} → {upstream_url}")
+    logger.info(f"[{req_id}] {request.method} /{path} → {upstream_url}")
     logger.debug(f"[{req_id}] forwarded headers: {out_headers}")
 
     body_json = _safe_json(body)
@@ -133,54 +240,6 @@ async def _proxy_request(request: Request, path: str):
         return await _stream_proxy(req_id, request.method, upstream_url, body, out_headers, started, path, body_json)
     else:
         return await _buffered_proxy(req_id, request.method, upstream_url, body, out_headers, started, path, body_json)
-
-
-# ---------------------------------------------------------------------------
-# Explicit OpenAI-compatible routes (so /docs shows them clearly)
-# ---------------------------------------------------------------------------
-@app.get("/v1/models", summary="List Models", tags=["Models"])
-async def list_models(request: Request):
-    """List available models from the upstream API."""
-    return await _proxy_request(request, "models")
-
-
-@app.get("/v1/models/{model_id}", summary="Retrieve Model", tags=["Models"])
-async def retrieve_model(request: Request, model_id: str):
-    """Retrieve details about a specific model."""
-    return await _proxy_request(request, f"models/{model_id}")
-
-
-@app.post("/v1/chat/completions", summary="Create Chat Completion", tags=["Chat"])
-async def chat_completions(request: Request):
-    """Create a chat completion. Supports streaming via `stream: true`."""
-    return await _proxy_request(request, "chat/completions")
-
-
-@app.post("/v1/completions", summary="Create Completion", tags=["Completions"])
-async def completions(request: Request):
-    """Create a text completion. Supports streaming via `stream: true`."""
-    return await _proxy_request(request, "completions")
-
-
-@app.post("/v1/embeddings", summary="Create Embeddings", tags=["Embeddings"])
-async def embeddings(request: Request):
-    """Create embeddings for the given input text."""
-    return await _proxy_request(request, "embeddings")
-
-
-# ---------------------------------------------------------------------------
-# Catch-all for any other /v1/ paths not explicitly listed above
-# ---------------------------------------------------------------------------
-@app.api_route(
-    "/v1/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-    summary="Proxy (catch-all)",
-    tags=["Other"],
-    include_in_schema=False,
-)
-async def proxy_catchall(request: Request, path: str):
-    """Fallback: forward any unmatched /v1/* request to upstream."""
-    return await _proxy_request(request, path)
 
 
 async def _buffered_proxy(req_id, method, url, body, headers, started, path, body_json):
@@ -283,28 +342,49 @@ def _response_headers(raw_headers) -> dict[str, str]:
     return {k: v for k, v in raw_headers.items() if k.lower() not in skip}
 
 
-def _log(req_id, method, url, fwd_headers, req_json, resp_json, status, duration, *, error=None, traceback=None):
-    """Write a JSON log file to .cache/ with full debug info."""
-    record = {
-        "id": req_id,
-        "ts": time.time(),
-        "duration_s": round(duration, 3),
-        "request": {
-            "method": method,
-            "upstream_url": url,
-            "forwarded_headers": {k: v for k, v in fwd_headers.items() if k.lower() != "authorization"},
-            "json": req_json,
-        },
-        "response": {"status_code": status, "json": resp_json},
-    }
-    if error:
-        record["error"] = error
-    if traceback:
-        record["traceback"] = traceback
+def _log(
+    req_id: str,
+    method: str,
+    url: str,
+    fwd_headers: Dict[str, str],
+    req_json: Optional[Dict[str, Any]],
+    resp_json: Optional[Any],
+    status: int,
+    duration: float,
+    *,
+    error: Optional[str] = None,
+    traceback: Optional[str] = None,
+) -> None:
+    """Write a JSON log file to .cache/logs/yymmdd_HH/{seq}.json with structured format."""
     try:
-        (LOG_DIR / f"{req_id}.json").write_text(
-            json.dumps(record, ensure_ascii=False, indent=2)
-        )
+        folder = _get_hour_folder()
+        seq = _get_next_sequence(folder)
+        log_file = folder / f"{seq}.json"
+
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "sequence": seq,
+            "request": {
+                "method": method,
+                "upstream_url": url,
+                "forwarded_headers": {k: v for k, v in fwd_headers.items() if k.lower() != "authorization"},
+                "body": req_json,
+            },
+            "response": {
+                "status_code": status,
+                "body": resp_json,
+            },
+            "duration_s": round(duration, 3),
+        }
+
+        if error:
+            log_entry["error"] = error
+        if traceback:
+            log_entry["traceback"] = traceback
+
+        with open(log_file, "w") as f:
+            json.dump(log_entry, f, ensure_ascii=False, indent=2)
+
     except Exception as e:
         logger.warning(f"[{req_id}] failed to write log: {e}")
 
@@ -315,18 +395,22 @@ def _log(req_id, method, url, fwd_headers, req_json, resp_json, status, duration
 def main(
     port: int = typer.Option(4343, "--port", "-p", help="Listen port"),
     host: str = typer.Option("0.0.0.0", "--host", help="Listen host"),
-    upstream: str = typer.Option(UPSTREAM_BASE, "--upstream", "-u", help="Upstream base URL"),
+    openai_upstream: str = typer.Option(OPENAI_UPSTREAM, "--openai-upstream", "-o", help="OpenAI-compatible upstream base URL"),
+    anthropic_upstream: str = typer.Option(ANTHROPIC_UPSTREAM, "--anthropic-upstream", "-a", help="Anthropic-compatible upstream base URL"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ):
-    """Start the GLM passthrough proxy."""
-    global UPSTREAM_BASE
-    UPSTREAM_BASE = upstream.rstrip("/")
+    """Start the passthrough proxy."""
+    global OPENAI_UPSTREAM, ANTHROPIC_UPSTREAM
+    OPENAI_UPSTREAM = openai_upstream.rstrip("/")
+    ANTHROPIC_UPSTREAM = anthropic_upstream.rstrip("/")
 
     level = "DEBUG" if verbose else "INFO"
     logger.remove()
     logger.add(lambda msg: print(msg, end=""), level=level, colorize=True)
 
-    logger.info(f"Proxy: http://{host}:{port}/v1/... → {UPSTREAM_BASE}/...")
+    logger.info(f"Starting passthrough proxy on http://{host}:{port}")
+    logger.info(f"  /openai/... → {OPENAI_UPSTREAM}/...")
+    logger.info(f"  /anthropic/... → {ANTHROPIC_UPSTREAM}/...")
     key = _get_api_key()
     if key:
         logger.info(f"Default API key: {key[:10]}...")

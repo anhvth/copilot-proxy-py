@@ -19,6 +19,25 @@ services:
       retries: 3
       start_period: 10s
 
+  glm-proxy:
+    build: .
+    container_name: glm-proxy
+    ports:
+      - "4343:4343"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - Z_AI_API_KEY=${Z_AI_API_KEY:-}
+      - GLM_UPSTREAM_BASE=${GLM_UPSTREAM_BASE:-https://api.z.ai/api/coding/paas/v4}
+      - ANTHROPIC_UPSTREAM_BASE=${ANTHROPIC_UPSTREAM_BASE:-https://api.z.ai/api/anthropic}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4343/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    command: ["python", "run_glm_proxy.py", "--host", "0.0.0.0", "--port", "4343"]
+
 volumes:
   copilot-data:
 
