@@ -31,36 +31,57 @@ cd /Users/anhvth/projects/copilot-reverse-proxy/copilot-proxy-py
 uv sync
 ```
 
-## Quick Start
+## Quick Start (Docker)
 
-### 1. Authenticate with GitHub
-
-First time setup - get a GitHub token via OAuth:
+### 1. Build and Start with Docker Compose
 
 ```bash
-uv run run_proxy.py auth
+# Build and start the container
+docker compose up -d --build
+
+# The server is now running on http://localhost:4242
 ```
 
-This will:
-- Display a GitHub verification code
-- Open verification URI in your browser (if available)
-- Save the GitHub token to `../copilot-data/github_token`
+### 2. Copy GitHub Token to Container
 
-### 2. Start the Server
+If you already have a GitHub token in `../copilot-data/github_token`:
 
 ```bash
-uv run run_proxy.py start --verbose
+# Copy token to the Docker volume
+docker cp ../copilot-data/github_token copilot-proxy:/app/copilot-data/github_token
+
+# Restart the container to pick up the token
+docker compose restart
 ```
 
-Server starts on `http://0.0.0.0:4141` by default.
+If you need to authenticate:
 
-### 3. Test with OpenAI SDK
+```bash
+# Run the auth command in the container
+docker compose exec copilot-proxy uv run run_proxy.py authenticate
+# Or authenticate locally, then copy the token
+```
+
+### 3. Verify It's Working
+
+```bash
+# Check container health
+docker compose ps
+
+# Test health endpoint
+curl http://localhost:4242/health
+
+# View logs
+docker compose logs -f copilot-proxy
+```
+
+### 4. Test with OpenAI SDK
 
 ```python
 import openai
 
 client = openai.OpenAI(
-    base_url="http://localhost:4141/v1",
+    base_url="http://localhost:4242/v1",
     api_key="dummy"  # Not used, but required
 )
 
@@ -81,13 +102,13 @@ for chunk in stream:
     print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
-### 4. Test with Anthropic SDK
+### 5. Test with Anthropic SDK
 
 ```python
 import anthropic
 
 client = anthropic.Anthropic(
-    base_url="http://localhost:4141",
+    base_url="http://localhost:4242",
     api_key="dummy"
 )
 
@@ -106,7 +127,7 @@ print(message.content[0].text)
 uv run run_proxy.py start [OPTIONS]
 
 Options:
-  -p, --port INTEGER              Server port (default: 4141)
+  -p, --port INTEGER              Server port (default: 4242)
   --host TEXT                     Server host (default: 0.0.0.0)
   -v, --verbose                   Verbose logging
   --show-token                    Show token in logs (security: don't use in production)
@@ -164,12 +185,20 @@ Options:
 
 ## Configuration
 
+### Docker Compose
+
+The [docker-compose.yml](docker-compose.yml) file includes:
+- Named volume `copilot-data` for persistent token storage
+- Health check endpoint
+- Automatic restart policy
+- Environment variables
+
 ### Environment Variables
 
-Create `.env` file in project root:
+Create `.env` file in project root (for local development):
 
 ```env
-PORT=4141
+PORT=4242
 HOST=0.0.0.0
 ACCOUNT_TYPE=individual
 VERBOSE=false
@@ -177,6 +206,7 @@ RATE_LIMIT_SECONDS=None
 RATE_LIMIT_WAIT=false
 MANUAL_APPROVE=false
 SHOW_TOKEN=false
+COPILOT_DATA_DIR=/app/copilot-data
 ```
 
 ### Token File Location
@@ -269,7 +299,7 @@ uv run run_proxy.py start --port 4142
 
 ### "Connection refused"
 - Ensure server is running: `uv run run_proxy.py start`
-- Check port with: `lsof -i :4141`
+- Check port with: `lsof -i :4242`
 
 ## Development
 
@@ -290,15 +320,49 @@ uv run run_proxy.py start --verbose
 
 ## Production Deployment
 
-### Using Uvicorn Directly
+### Docker Compose (Recommended)
+
 ```bash
-uv run uvicorn copilot_proxy.api.app:app \
-  --host 0.0.0.0 \
-  --port 4141 \
-  --workers 4
+# Start in detached mode
+docker compose up -d
+
+# View logs
+docker compose logs -f copilot-proxy
+
+# Stop
+docker compose down
+
+# Rebuild after code changes
+docker compose up -d --build
 ```
 
-### Docker
+### Using Docker Directly
+
+```bash
+# Build image
+docker build -t copilot-proxy-py .
+
+# Run container
+docker run -d \
+  --name copilot-proxy \
+  -p 4242:4242 \
+  -v copilot-data:/app/copilot-data \
+  -e COPILOT_DATA_DIR=/app/copilot-data \
+  copilot-proxy-py
+```
+
+### Local Development
+
+```bash
+# Install dependencies
+uv sync
+
+# Authenticate
+uv run run_proxy.py authenticate
+
+# Start server
+uv run run_proxy.py start-server --verbose
+```
 ```dockerfile
 FROM python:3.11-slim
 
@@ -309,7 +373,7 @@ RUN pip install uv
 RUN uv sync
 
 ENV PYTHONUNBUFFERED=1
-EXPOSE 4141
+EXPOSE 4242
 
 CMD ["uv", "run", "run_proxy.py", "start"]
 ```

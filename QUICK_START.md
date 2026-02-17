@@ -12,11 +12,38 @@ Successfully implemented a complete Python-based VLLM-compatible proxy server fo
 - **Production-ready** with async/await throughout
 - **Tested** and verified to work
 
-## 🚀 Getting Started (3 Steps)
+## 🚀 Getting Started (Docker Recommended)
+
+### Step 1: Build and Start with Docker Compose
+```bash
+cd /Users/anhvth/projects/copilot-proxy-py
+docker compose up -d --build
+# Server starts on http://localhost:4242
+```
+
+### Step 2: Copy GitHub Token
+```bash
+# Copy your existing token (if any)
+docker cp ../copilot-data/github_token copilot-proxy:/app/copilot-data/github_token
+
+# Or authenticate inside the container
+docker compose exec copilot-proxy uv run run_proxy.py authenticate
+```
+
+### Step 3: Verify
+```bash
+# Check container health
+docker compose ps
+
+# Test health endpoint
+curl http://localhost:4242/health
+```
+
+## 🚀 Getting Started (Local Development)
 
 ### Step 1: Setup
 ```bash
-cd /Users/anhvth/projects/copilot-reverse-proxy/copilot-proxy-py
+cd /Users/anhvth/projects/copilot-proxy-py
 uv sync
 ```
 
