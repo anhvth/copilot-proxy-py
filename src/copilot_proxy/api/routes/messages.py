@@ -146,27 +146,50 @@ async def count_tokens(request: AnthropicCountTokensRequest):
     Returns:
         Token count response
     """
-    # Simple token counting (rough estimate)
-    total_tokens = 0
+    try:
+        # Check rate limit
+        state = get_state()
+        rate_limiter = get_rate_limiter()
 
-    if request.system:
-        system_text = (
-            request.system if isinstance(request.system, str) else json.dumps(request.system)
-        )
-        total_tokens += len(system_text.split())
-
-    for msg in request.messages:
-        if isinstance(msg.content, str):
-            total_tokens += len(msg.content.split())
-        elif isinstance(msg.content, list):
-            total_tokens += sum(
-                len(block.get("text", "").split())
-                if isinstance(block, dict)
-                else len(str(block).split())
-                for block in msg.content
+        if state.rate_limit_seconds:
+            await rate_limiter.check_rate_limit(
+                rate_limit_seconds=state.rate_limit_seconds,
+                wait_mode=state.rate_limit_wait,
             )
 
-    return AnthropicCountTokensResponse(input_tokens=total_tokens)
+        # Simple token counting (rough estimate)
+        total_tokens = 0
+
+        if request.system:
+            system_text = (
+                request.system if isinstance(request.system, str) else json.dumps(request.system)
+            )
+            total_tokens += len(system_text.split())
+
+        messages = request.messages if isinstance(request.messages, list) else []
+        for msg in messages:
+            if not hasattr(msg, 'content'):
+                continue
+
+            if isinstance(msg.content, str):
+                total_tokens += len(msg.content.split())
+            elif isinstance(msg.content, list):
+                total_tokens += sum(
+                    len(block.get("text", "").split())
+                    if isinstance(block, dict)
+                    else len(str(block).split())
+                    for block in msg.content
+                )
+
+        result = AnthropicCountTokensResponse(input_tokens=total_tokens)
+        logger.debug(f"Token count: {total_tokens}")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Count tokens error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Token counting failed: {str(e)}")
 
 
 def _dict_to_response(data: dict, model: str):
@@ -187,30 +210,52 @@ def _dict_to_response(data: dict, model: str):
     )
 
     choices = []
-    if "choices" in data:
-        for i, choice in enumerate(data["choices"]):
-            msg_content = choice.get("message", {}).get("content", "")
+    data_choices = data.get("choices") if isinstance(data, dict) else None
 
-            if isinstance(msg_content, list):
-                msg_content = "".join(
-                    item.get("text", "") for item in msg_content if isinstance(item, dict)
-                )
+    if isinstance(data_choices, list):
+        for i, choice in enumerate(data_choices):
+            if not isinstance(choice, dict):
+                continue
+
+            message = choice.get("message")
+            msg_content = ""
+
+            if isinstance(message, dict):
+                raw_content = message.get("content", "")
+
+                if isinstance(raw_content, str):
+                    msg_content = raw_content
+                elif isinstance(raw_content, list):
+                    # Handle list of text items
+                    msg_content = "".join(
+                        item.get("text", "")
+                        for item in raw_content
+                        if isinstance(item, dict)
+                    )
+
+            finish_reason = choice.get("finish_reason", "stop")
+            if not isinstance(finish_reason, str):
+                finish_reason = "stop"
 
             choices.append(
                 ChatCompletionChoice(
                     index=i,
                     message=ChatCompletionMessage(role="assistant", content=msg_content),
-                    finish_reason=choice.get("finish_reason", "stop"),
+                    finish_reason=finish_reason,
                 )
             )
 
     usage = None
-    if "usage" in data:
-        usage = ChatCompletionUsage(**data["usage"])
+    usage_data = data.get("usage") if isinstance(data, dict) else None
+    if isinstance(usage_data, dict):
+        try:
+            usage = ChatCompletionUsage(**usage_data)
+        except Exception as e:
+            logger.warning(f"Failed to parse usage data: {e}")
 
     return ChatCompletionResponse(
-        id=data.get("id", f"msg_{int(time.time())}"),
-        created=data.get("created", int(time.time())),
+        id=data.get("id", f"msg_{int(time.time())}") if isinstance(data, dict) else f"msg_{int(time.time())}",
+        created=data.get("created", int(time.time())) if isinstance(data, dict) else int(time.time()),
         model=model,
         choices=choices,
         usage=usage,

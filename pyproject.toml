@@ -16,6 +16,7 @@ dependencies = [
     "apscheduler>=3.10.0",
     "python-dotenv>=1.0.0",
     "rich>=13.0.0",
+    "portalocker>=2.8.0",
 ]
 
 [project.optional-dependencies]

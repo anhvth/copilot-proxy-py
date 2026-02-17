@@ -16,8 +16,67 @@ from ..utils.logger import setup_logger, get_logger
 logger = get_logger(__name__)
 
 
+def validate_account_type(value: str) -> str:
+    """Validate account_type option.
+    
+    Args:
+        value: Account type string
+        
+    Returns:
+        Validated account type
+        
+    Raises:
+        typer.BadParameter: If invalid
+    """
+    valid_types = {"individual", "business", "enterprise"}
+    value_lower = value.lower()
+    if value_lower not in valid_types:
+        raise typer.BadParameter(
+            f"account_type must be one of: {', '.join(sorted(valid_types))}. Got: {value}"
+        )
+    return value_lower
+
+
+def validate_port(value: int) -> int:
+    """Validate port option.
+    
+    Args:
+        value: Port number
+        
+    Returns:
+        Validated port number
+        
+    Raises:
+        typer.BadParameter: If invalid
+    """
+    if not (1 <= value <= 65535):
+        raise typer.BadParameter(
+            f"Port must be between 1 and 65535. Got: {value}"
+        )
+    return value
+
+
+def validate_rate_limit(value: Optional[int]) -> Optional[int]:
+    """Validate rate_limit option.
+    
+    Args:
+        value: Rate limit in seconds
+        
+    Returns:
+        Validated rate limit or None
+        
+    Raises:
+        typer.BadParameter: If invalid
+    """
+    if value is not None and value <= 0:
+        raise typer.BadParameter(
+            f"Rate limit must be greater than 0. Got: {value}"
+        )
+    return value
+
+
 async def async_main(
-    port: int = typer.Option(4242, "--port", "-p", help="Server port"),
+    port: int = typer.Option(4242, "--port", "-p", help="Server port", callback=validate_port),
     host: str = typer.Option("0.0.0.0", "--host", help="Server host"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging"),
     show_token: bool = typer.Option(False, "--show-token", help="Show token in logs"),
@@ -25,10 +84,11 @@ async def async_main(
         None,
         "--rate-limit",
         help="Rate limit in seconds between requests",
+        callback=validate_rate_limit,
     ),
     wait: bool = typer.Option(False, "--wait", help="Wait when rate limited (vs reject)"),
     manual_approve: bool = typer.Option(False, "--manual-approve", help="Require approval per request"),
-    account_type: str = typer.Option("individual", "--account-type", help="Account type: individual, business, enterprise"),
+    account_type: str = typer.Option("individual", "--account-type", help="Account type: individual, business, enterprise", callback=validate_account_type),
 ):
     """Start the proxy server."""
     # Setup logging
@@ -104,7 +164,7 @@ async def async_main(
 
 
 def start_server(
-    port: int = typer.Option(4242, "--port", "-p", help="Server port"),
+    port: int = typer.Option(4242, "--port", "-p", help="Server port", callback=validate_port),
     host: str = typer.Option("0.0.0.0", "--host", help="Server host"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging"),
     show_token: bool = typer.Option(False, "--show-token", help="Show token in logs"),
@@ -112,10 +172,11 @@ def start_server(
         None,
         "--rate-limit",
         help="Rate limit in seconds between requests",
+        callback=validate_rate_limit,
     ),
     wait: bool = typer.Option(False, "--wait", help="Wait when rate limited (vs reject)"),
     manual_approve: bool = typer.Option(False, "--manual-approve", help="Require approval per request"),
-    account_type: str = typer.Option("individual", "--account-type", help="Account type: individual, business, enterprise"),
+    account_type: str = typer.Option("individual", "--account-type", help="Account type: individual, business, enterprise", callback=validate_account_type),
 ):
     """Start the proxy server."""
     asyncio.run(

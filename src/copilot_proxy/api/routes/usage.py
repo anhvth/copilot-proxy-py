@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 
+from ...core.rate_limiter import get_rate_limiter
 from ...core.state import get_state
 from ...core.token_manager import get_token_manager
 from ...services.github.client import GitHubClient
@@ -12,37 +13,63 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-@router.get("/token")
+@router.get("/debug/token")
 async def get_token_info():
     """Get current token information (debug endpoint).
 
     Requires --show-token flag to be set.
     """
-    state = get_state()
+    try:
+        # Check rate limit
+        state = get_state()
+        rate_limiter = get_rate_limiter()
 
-    if not state.copilot_token:
-        raise HTTPException(status_code=400, detail="No token available")
+        if state.rate_limit_seconds:
+            await rate_limiter.check_rate_limit(
+                rate_limit_seconds=state.rate_limit_seconds,
+                wait_mode=state.rate_limit_wait,
+            )
 
-    # Only show token if explicitly enabled
-    from ...config.settings import settings
+        if not state.copilot_token:
+            raise HTTPException(status_code=400, detail="No token available")
 
-    token_preview = "***" if not settings.show_token else state.copilot_token[:20] + "***"
+        # Only show token if explicitly enabled
+        from ...config.settings import settings
 
-    return {
-        "has_token": True,
-        "token_preview": token_preview,
-        "expires_at": state.copilot_token_expires_at.isoformat()
-        if state.copilot_token_expires_at
-        else None,
-        "account_type": state.account_type,
-    }
+        token_preview = "***" if not settings.show_token else state.copilot_token[:20] + "***"
+
+        result = {
+            "has_token": True,
+            "token_preview": token_preview,
+            "expires_at": state.copilot_token_expires_at.isoformat()
+            if state.copilot_token_expires_at
+            else None,
+            "account_type": state.account_type,
+        }
+
+        logger.debug(f"Token info retrieved (preview: {token_preview})")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token info error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get token info: {str(e)}")
 
 
 @router.get("/usage")
 async def get_usage():
     """Get Copilot usage information."""
     try:
+        # Check rate limit
         state = get_state()
+        rate_limiter = get_rate_limiter()
+
+        if state.rate_limit_seconds:
+            await rate_limiter.check_rate_limit(
+                rate_limit_seconds=state.rate_limit_seconds,
+                wait_mode=state.rate_limit_wait,
+            )
 
         if not state.github_token:
             raise HTTPException(status_code=400, detail="GitHub token not available")
@@ -50,13 +77,14 @@ async def get_usage():
         github_client = GitHubClient()
         usage = await github_client.get_copilot_usage(state.github_token)
 
+        logger.debug(f"Usage retrieved successfully")
         return usage
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get usage: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Usage error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get usage: {str(e)}")
 
 
 @router.get("/v1/models/count_tokens", include_in_schema=False)

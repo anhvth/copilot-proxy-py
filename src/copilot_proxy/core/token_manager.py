@@ -8,6 +8,7 @@ import httpx
 
 from ..config.constants import GITHUB_API_BASE, GITHUB_TOKEN_ENDPOINT
 from ..config.paths import get_github_token_path
+from ..services.github.auth import check_token_file_permissions
 from ..utils.logger import get_logger
 from .state import get_state, update_state
 
@@ -38,6 +39,9 @@ class TokenManager:
 
         if not token_file.exists():
             raise FileNotFoundError(f"GitHub token file not found: {token_file}")
+
+        # Check token file permissions for security
+        check_token_file_permissions(token_file)
 
         token = token_file.read_text().strip()
         if not token:

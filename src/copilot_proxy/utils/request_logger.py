@@ -1,7 +1,7 @@
 """Request/response logging to cache files."""
 
 import json
-import fcntl
+import portalocker
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -58,15 +58,11 @@ class RequestLogger:
         if not counter_file.exists():
             counter_file.write_text("0\n")
 
-        # Use file locking to safely read and increment counter
+        # Use portalocker for cross-platform file locking
         try:
             with open(counter_file, "r+") as f:
-                # Acquire exclusive lock (non-blocking on Windows)
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                except (ImportError, AttributeError):
-                    # On Windows where fcntl is not available, fall back to simple read/write
-                    pass
+                # Acquire exclusive lock (blocks until lock is acquired)
+                portalocker.lock(f, portalocker.LOCK_EX)
 
                 # Read current counter value
                 f.seek(0)
@@ -81,16 +77,13 @@ class RequestLogger:
                 f.write(str(next_seq) + "\n")
                 f.truncate()
 
-                # Release lock
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                except (ImportError, AttributeError):
-                    pass
-
+                # Lock is automatically released when we exit the with block
                 return next_seq
         except Exception as e:
             logger.error(f"Failed to get next sequence: {e}")
+            # Fallback: count existing files
             fallback = len(list(folder.glob("*.json"))) + 1
+            logger.warning(f"Using fallback sequence number: {fallback}")
             return fallback
 
     async def log_pair(

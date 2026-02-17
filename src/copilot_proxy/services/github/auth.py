@@ -1,16 +1,47 @@
 """GitHub Device Code OAuth flow."""
 
 import asyncio
+import os
+import stat
 import time
+from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from ...config.constants import GITHUB_BASE_URL
+from ...config.paths import get_github_token_path
 from ...utils.logger import get_logger
 from .schemas import GitHubDeviceAuthorizationResponse, GitHubTokenResponse
 
 logger = get_logger(__name__)
+
+
+class SecurityError(Exception):
+    """Security-related exceptions."""
+    pass
+
+
+def check_token_file_permissions(token_file: Path) -> None:
+    """Ensure token file has secure permissions.
+    
+    Args:
+        token_file: Path to token file
+    
+    Raises:
+        SecurityError: If permissions are too permissive
+    """
+    if not token_file.exists():
+        return
+    
+    mode = token_file.stat().st_mode
+    
+    # Check if group or others have read permission
+    if mode & stat.S_IRGRP or mode & stat.S_IROTH:
+        logger.warning(
+            f"Token file {token_file} has insecure permissions. "
+            f"Please run: chmod 600 {token_file}"
+        )
 
 
 class GitHubDeviceCodeAuth:

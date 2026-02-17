@@ -83,32 +83,36 @@ async def stream_chat_chunks(
                 # Parse SSE line
                 data = json.loads(line)
 
-                # Extract content from Copilot response
-                if "choices" in data and len(data["choices"]) > 0:
-                    choice = data["choices"][0]
+                # Extract content from Copilot response with safe dict access
+                choices = data.get("choices") if isinstance(data, dict) else None
+                if isinstance(choices, list) and len(choices) > 0:
+                    choice = choices[0]
 
-                    if "delta" in choice and "content" in choice["delta"]:
-                        content = choice["delta"]["content"]
-                        if content:
-                            accumulated_content += content
+                    if isinstance(choice, dict):
+                        delta = choice.get("delta")
+                        if isinstance(delta, dict):
+                            content = delta.get("content")
+                            if isinstance(content, str) and content:
+                                accumulated_content += content
 
-                            # Create streaming response
-                            chunk = ChatCompletionStreamResponse(
-                                id=chunk_id,
-                                created=int(time.time()),
-                                model=request.model,
-                                choices=[
-                                    ChatCompletionStreamChoice(
-                                        index=0,
-                                        delta=ChatCompletionChoiceDelta(content=content),
-                                        finish_reason=None,
-                                    )
-                                ],
-                            )
-                            yield f"data: {chunk.model_dump_json()}\n\n"
+                                # Create streaming response
+                                chunk = ChatCompletionStreamResponse(
+                                    id=chunk_id,
+                                    created=int(time.time()),
+                                    model=request.model,
+                                    choices=[
+                                        ChatCompletionStreamChoice(
+                                            index=0,
+                                            delta=ChatCompletionChoiceDelta(content=content),
+                                            finish_reason=None,
+                                        )
+                                    ],
+                                )
+                                yield f"data: {chunk.model_dump_json()}\n\n"
 
-                    if "finish_reason" in choice and choice["finish_reason"]:
-                        finish_reason = choice["finish_reason"]
+                        finish_reason = choice.get("finish_reason")
+                        if isinstance(finish_reason, str) and finish_reason:
+                            finish_reason = finish_reason
 
             except json.JSONDecodeError:
                 logger.debug(f"Failed to parse SSE line: {line}")
@@ -172,35 +176,56 @@ async def chat_completions(
             stream=False,
         )
 
-        # Transform to OpenAI format if needed
-        if "choices" in response:
-            choices = []
-            for i, choice in enumerate(response["choices"]):
-                msg_content = choice.get("message", {}).get("content", "")
+        # Transform to OpenAI format with safe dict access
+        choices = response.get("choices") if isinstance(response, dict) else None
+        if isinstance(choices, list):
+            transformed_choices = []
+            for i, choice in enumerate(choices):
+                if not isinstance(choice, dict):
+                    continue
 
-                if isinstance(msg_content, list):
-                    msg_content = "".join(
-                        item.get("text", "") for item in msg_content if isinstance(item, dict)
-                    )
+                message = choice.get("message")
+                msg_content = ""
 
-                choices.append(
+                if isinstance(message, dict):
+                    raw_content = message.get("content", "")
+
+                    if isinstance(raw_content, str):
+                        msg_content = raw_content
+                    elif isinstance(raw_content, list):
+                        # Handle list of text items
+                        msg_content = "".join(
+                            item.get("text", "")
+                            for item in raw_content
+                            if isinstance(item, dict)
+                        )
+
+                finish_reason = choice.get("finish_reason", "stop")
+                if not isinstance(finish_reason, str):
+                    finish_reason = "stop"
+
+                transformed_choices.append(
                     ChatCompletionChoice(
                         index=i,
                         message=ChatCompletionMessage(role="assistant", content=msg_content),
-                        finish_reason=choice.get("finish_reason", "stop"),
+                        finish_reason=finish_reason,
                     )
                 )
 
-            # Get usage if available
+            # Get usage if available with safe access
             usage = None
-            if "usage" in response:
-                usage = ChatCompletionUsage(**response["usage"])
+            usage_data = response.get("usage") if isinstance(response, dict) else None
+            if isinstance(usage_data, dict):
+                try:
+                    usage = ChatCompletionUsage(**usage_data)
+                except Exception as e:
+                    logger.warning(f"Failed to parse usage data: {e}")
 
             result = ChatCompletionResponse(
-                id=response.get("id", f"chatcmpl-{int(time.time())}"),
-                created=response.get("created", int(time.time())),
+                id=response.get("id", f"chatcmpl-{int(time.time())}") if isinstance(response, dict) else f"chatcmpl-{int(time.time())}",
+                created=response.get("created", int(time.time())) if isinstance(response, dict) else int(time.time()),
                 model=request.model,
-                choices=choices,
+                choices=transformed_choices,
                 usage=usage,
             )
 
