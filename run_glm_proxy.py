@@ -108,11 +108,11 @@ async def health():
     return {"status": "healthy", "upstream": UPSTREAM_BASE}
 
 
-@app.api_route(
-    "/v1/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-)
-async def proxy(request: Request, path: str):
+# ---------------------------------------------------------------------------
+# Core proxy helper — all explicit routes delegate here
+# ---------------------------------------------------------------------------
+async def _proxy_request(request: Request, path: str):
+    """Forward request to upstream and return response."""
     req_id = str(uuid.uuid4())[:8]
     started = time.time()
 
@@ -120,14 +120,12 @@ async def proxy(request: Request, path: str):
     if request.url.query:
         upstream_url += f"?{request.url.query}"
 
-    # Read request body fully (needed for logging + forwarding)
     body = await request.body()
     out_headers = _clean_headers(dict(request.headers))
 
     logger.info(f"[{req_id}] {request.method} /v1/{path} → {upstream_url}")
     logger.debug(f"[{req_id}] forwarded headers: {out_headers}")
 
-    # Determine if caller expects streaming (SSE)
     body_json = _safe_json(body)
     is_stream = isinstance(body_json, dict) and body_json.get("stream", False)
 
@@ -135,6 +133,54 @@ async def proxy(request: Request, path: str):
         return await _stream_proxy(req_id, request.method, upstream_url, body, out_headers, started, path, body_json)
     else:
         return await _buffered_proxy(req_id, request.method, upstream_url, body, out_headers, started, path, body_json)
+
+
+# ---------------------------------------------------------------------------
+# Explicit OpenAI-compatible routes (so /docs shows them clearly)
+# ---------------------------------------------------------------------------
+@app.get("/v1/models", summary="List Models", tags=["Models"])
+async def list_models(request: Request):
+    """List available models from the upstream API."""
+    return await _proxy_request(request, "models")
+
+
+@app.get("/v1/models/{model_id}", summary="Retrieve Model", tags=["Models"])
+async def retrieve_model(request: Request, model_id: str):
+    """Retrieve details about a specific model."""
+    return await _proxy_request(request, f"models/{model_id}")
+
+
+@app.post("/v1/chat/completions", summary="Create Chat Completion", tags=["Chat"])
+async def chat_completions(request: Request):
+    """Create a chat completion. Supports streaming via `stream: true`."""
+    return await _proxy_request(request, "chat/completions")
+
+
+@app.post("/v1/completions", summary="Create Completion", tags=["Completions"])
+async def completions(request: Request):
+    """Create a text completion. Supports streaming via `stream: true`."""
+    return await _proxy_request(request, "completions")
+
+
+@app.post("/v1/embeddings", summary="Create Embeddings", tags=["Embeddings"])
+async def embeddings(request: Request):
+    """Create embeddings for the given input text."""
+    return await _proxy_request(request, "embeddings")
+
+
+# ---------------------------------------------------------------------------
+# Catch-all for any other /v1/ paths not explicitly listed above
+# ---------------------------------------------------------------------------
+@app.api_route(
+    "/v1/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    summary="Proxy (catch-all)",
+    tags=["Other"],
+    include_in_schema=False,
+)
+async def proxy_catchall(request: Request, path: str):
+    """Fallback: forward any unmatched /v1/* request to upstream."""
+    return await _proxy_request(request, path)
 
 
 async def _buffered_proxy(req_id, method, url, body, headers, started, path, body_json):
