@@ -82,3 +82,4 @@ temp/
 *.egg-info/
 dist/
 build/
+.env
