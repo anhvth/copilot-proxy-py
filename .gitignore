@@ -83,3 +83,5 @@ temp/
 dist/
 build/
 .env
+.playwright-mcp/
+plan/
