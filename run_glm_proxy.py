@@ -120,6 +120,92 @@ def _safe_json(data: bytes) -> dict | list | None:
         return None
 
 
+def _drop_none_values(value: Any) -> Any:
+    """Recursively remove keys with None values from dict/list payloads."""
+    if isinstance(value, dict):
+        return {k: _drop_none_values(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_none_values(v) for v in value]
+    return value
+
+
+def _normalize_message_content_parts(payload: dict[str, Any]) -> None:
+    """Normalize OpenAI content-part variants to text parts expected by GLM-compatible upstreams."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        normalized_parts: list[Any] = []
+        changed = False
+        for part in content:
+            if not isinstance(part, dict):
+                normalized_parts.append(part)
+                continue
+
+            part_type = part.get("type")
+            # Newer OpenAI SDKs may emit input_text/output_text; many compatible
+            # providers only accept type="text".
+            if part_type in {"input_text", "output_text"}:
+                changed = True
+                normalized_parts.append({"type": "text", "text": part.get("text", "")})
+                continue
+
+            # Discard unsupported part types that commonly trigger strict upstream validation.
+            if part_type in {"input_audio", "audio", "image_url", "input_image", "file", "refusal"}:
+                changed = True
+                continue
+
+            normalized_parts.append(part)
+
+        if changed:
+            message["content"] = normalized_parts
+
+
+def _sanitize_openai_payload(path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Best-effort compatibility sanitizer for strict OpenAI-compatible upstreams.
+
+    Returns sanitized payload and a list of notes describing applied changes.
+    """
+    sanitized = _drop_none_values(dict(payload))
+    notes: list[str] = []
+
+    # Common alias used by latest SDKs; many OpenAI-compatible providers still expect max_tokens.
+    if "max_completion_tokens" in sanitized and "max_tokens" not in sanitized:
+        sanitized["max_tokens"] = sanitized.pop("max_completion_tokens")
+        notes.append("mapped max_completion_tokens -> max_tokens")
+
+    if path in {"chat/completions", "v1/chat/completions"}:
+        # Fields often rejected by strict OpenAI-compatible providers.
+        dropped = []
+        for key in (
+            "store",
+            "metadata",
+            "prediction",
+            "modalities",
+            "audio",
+            "reasoning",
+            "reasoning_effort",
+            "service_tier",
+        ):
+            if key in sanitized:
+                sanitized.pop(key, None)
+                dropped.append(key)
+
+        if dropped:
+            notes.append(f"dropped unsupported keys: {', '.join(dropped)}")
+
+        _normalize_message_content_parts(sanitized)
+
+    return sanitized, notes
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -234,6 +320,16 @@ async def _proxy_request(request: Request, path: str, base_url: str):
     logger.debug(f"[{req_id}] forwarded headers: {out_headers}")
 
     body_json = _safe_json(body)
+
+    # Compatibility mode for strict OpenAI-compatible upstreams (e.g., Z.AI).
+    # Some latest OpenAI SDK params are rejected with generic "invalid parameter" errors.
+    if isinstance(body_json, dict) and base_url == OPENAI_UPSTREAM:
+        sanitized_body_json, sanitize_notes = _sanitize_openai_payload(path, body_json)
+        if sanitized_body_json != body_json:
+            body_json = sanitized_body_json
+            body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+            logger.debug(f"[{req_id}] sanitized request body for upstream compatibility: {sanitize_notes}")
+
     is_stream = isinstance(body_json, dict) and body_json.get("stream", False)
 
     if is_stream:
