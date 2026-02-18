@@ -144,6 +144,7 @@ def _normalize_message_content_parts(payload: dict[str, Any]) -> None:
 
         normalized_parts: list[Any] = []
         changed = False
+        dropped_image_parts = 0
         for part in content:
             if not isinstance(part, dict):
                 normalized_parts.append(part)
@@ -160,9 +161,19 @@ def _normalize_message_content_parts(payload: dict[str, Any]) -> None:
             # Discard unsupported part types that commonly trigger strict upstream validation.
             if part_type in {"input_audio", "audio", "image_url", "input_image", "file", "refusal"}:
                 changed = True
+                if part_type in {"image_url", "input_image"}:
+                    dropped_image_parts += 1
                 continue
 
             normalized_parts.append(part)
+
+        # Some clients send image-only user turns; dropping unsupported image parts would
+        # otherwise leave an empty content array that strict upstreams reject.
+        if changed and not normalized_parts and dropped_image_parts > 0:
+            normalized_parts = [{
+                "type": "text",
+                "text": "[Image omitted by proxy: upstream endpoint does not accept image content parts]",
+            }]
 
         if changed:
             message["content"] = normalized_parts
