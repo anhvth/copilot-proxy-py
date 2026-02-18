@@ -11,6 +11,7 @@ services:
       - COPILOT_DATA_DIR=/app/copilot-data
     volumes:
       - copilot-data:/app/copilot-data
+      - .cache:/app/.cache
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4242/health').read()"]
