@@ -11,7 +11,7 @@ services:
       - COPILOT_DATA_DIR=/app/copilot-data
     volumes:
       - copilot-data:/app/copilot-data
-      - .cache:/app/.cache
+      - ${HOME}/.cache/conversations_proxy_cache:/app/.cache
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4242/health').read()"]
@@ -39,7 +39,7 @@ services:
       start_period: 10s
     command: ["python", "run_glm_proxy.py", "--host", "0.0.0.0", "--port", "4343"]
     volumes:
-      - ./.cache:/app/.cache
+      - ${HOME}/.cache/conversations_proxy_cache:/app/.cache
 
   log-visualizer:
     build: .
@@ -49,7 +49,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     volumes:
-      - ./.cache:/app/.cache
+      - ${HOME}/.cache/conversations_proxy_cache:/app/.cache
     restart: unless-stopped
     command: ["python", "live_conversations.py"]
     healthcheck:
