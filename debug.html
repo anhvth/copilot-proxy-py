@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Debug</title>
+    <style>
+        body {
+            font-family: monospace;
+            background: #0a0a0a;
+            color: #0f0;
+            padding: 20px;
+        }
+        .section {
+            margin: 20px 0;
+            padding: 10px;
+            border: 1px solid #0f0;
+        }
+        .error {
+            color: #f00;
+        }
+        .success {
+            color: #0f0;
+        }
+        button {
+            background: #0f0;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            cursor: pointer;
+            font-family: monospace;
+            margin: 5px;
+        }
+        pre {
+            background: #1a1a1a;
+            padding: 10px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔧 Log Visualizer Debug Tool</h1>
+    
+    <div class="section">
+        <h2>Step 1: Test API Endpoint</h2>
+        <button onclick="testAPI()">Test /api/logs</button>
+        <div id="apiTest"></div>
+    </div>
+    
+    <div class="section">
+        <h2>Step 2: Vue.js Test</h2>
+        <button onclick="testVue()">Test Vue Loading</button>
+        <div id="vueTest"></div>
+    </div>
+    
+    <div class="section">
+        <h2>Step 3: Console Logs</h2>
+        <pre id="console"></pre>
+    </div>
+    
+    <script>
+        // Capture console logs
+        const originalLog = console.log;
+        const originalError = console.error;
+        const consoleOutput = document.getElementById('console');
+        
+        console.log = function(...args) {
+            consoleOutput.textContent += '[LOG] ' + args.join(' ') + '\n';
+            originalLog.apply(console, args);
+        };
+        
+        console.error = function(...args) {
+            consoleOutput.textContent += '[ERROR] ' + args.join(' ') + '\n';
+            originalError.apply(console, args);
+        };
+        
+        async function testAPI() {
+            const output = document.getElementById('apiTest');
+            try {
+                output.innerHTML = '<p>Testing...</p>';
+                console.log('Fetching /api/logs...');
+                
+                const response = await fetch('/api/logs?limit=5');
+                console.log('Response status:', response.status);
+                console.log('Response headers:', [...response.headers.entries()]);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                console.log('Data received:', data);
+                
+                output.innerHTML = `
+                    <p class="success">✓ API Test PASSED</p>
+                    <p>Status: ${response.status}</p>
+                    <p>Items received: ${data.length}</p>
+                    <p>First item ID: ${data[0]?.id || 'N/A'}</p>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+            } catch (error) {
+                console.error('API test failed:', error);
+                output.innerHTML = `
+                    <p class="error">✗ API Test FAILED</p>
+                    <p class="error">${error.message}</p>
+                    <pre class="error">${error.stack}</pre>
+                `;
+            }
+        }
+        
+        async function testVue() {
+            const output = document.getElementById('vueTest');
+            try {
+                output.innerHTML = '<p>Testing...</p>';
+                console.log('Testing Vue.js...');
+                
+                // Check if Vue is loaded
+                if (typeof Vue === 'undefined') {
+                    throw new Error('Vue.js is not loaded!');
+                }
+                
+                console.log('Vue version:', Vue.version);
+                
+                // Test creating a simple Vue app
+                const { createApp, ref, onMounted } = Vue;
+                const testData = ref([]);
+                
+                console.log('Fetching data...');
+                const response = await fetch('/api/logs?limit=3');
+                testData.value = await response.json();
+                console.log('Test data:', testData.value);
+                
+                output.innerHTML = `
+                    <p class="success">✓ Vue Test PASSED</p>
+                    <p>Vue version: ${Vue.version}</p>
+                    <p>Test data length: ${testData.value.length}</p>
+                `;
+            } catch (error) {
+                console.error('Vue test failed:', error);
+                output.innerHTML = `
+                    <p class="error">✗ Vue Test FAILED</p>
+                    <p class="error">${error.message}</p>
+                `;
+            }
+        }
+        
+        // Auto-run tests on load
+        window.addEventListener('load', () => {
+            console.log('Page loaded, running auto-tests...');
+            console.log('User agent:', navigator.userAgent);
+            console.log('Location:', window.location.href);
+            setTimeout(testAPI, 100);
+        });
+    </script>
+    
+    <!-- Try to load Vue for testing  -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+</body>
+</html>

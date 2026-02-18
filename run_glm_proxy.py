@@ -322,15 +322,53 @@ def _parse_sse_log(data: bytes) -> dict | list | None:
     try:
         text = data.decode("utf-8", errors="replace")
         chunks = []
+        full_content = []
+        full_reasoning = []
+        
         for line in text.split("\n"):
             line = line.strip()
             if line.startswith("data: ") and line != "data: [DONE]":
                 try:
-                    chunks.append(json.loads(line[6:]))
+                    chunk = json.loads(line[6:])
+                    chunks.append(chunk)
+                    
+                    # OpenAI-compatible format (including GLM)
+                    if "choices" in chunk and len(chunk["choices"]) > 0:
+                        delta = chunk["choices"][0].get("delta", {})
+                        # Capture regular content
+                        if "content" in delta and delta["content"]:
+                            full_content.append(delta["content"])
+                        # Capture reasoning_content (GLM-specific)
+                        if "reasoning_content" in delta and delta["reasoning_content"]:
+                            full_reasoning.append(delta["reasoning_content"])
+                    
+                    # Anthropic Messages API format
+                    if "type" in chunk:
+                        if chunk["type"] == "content_block_delta":
+                            if "delta" in chunk and "text" in chunk.get("delta", {}):
+                                full_content.append(chunk["delta"]["text"])
+                        elif chunk["type"] == "content_block_start":
+                            # Anthropic can have initial text in content_block_start
+                            if "content_block" in chunk and chunk["content_block"].get("type") == "text":
+                                text_val = chunk["content_block"].get("text", "")
+                                if text_val:
+                                    full_content.append(text_val)
                 except json.JSONDecodeError:
                     pass
+                    
         if chunks:
-            return {"_sse_chunks": len(chunks), "first": chunks[0], "last": chunks[-1]}
+            result = {
+                "_sse_chunks": len(chunks), 
+                "first": chunks[0], 
+                "last": chunks[-1],
+            }
+            # Add full_response_text if we captured any content
+            if full_content:
+                result["full_response_text"] = "".join(full_content)
+            # Add reasoning if present (GLM-specific)
+            if full_reasoning:
+                result["full_reasoning_content"] = "".join(full_reasoning)
+            return result
     except Exception:
         pass
     return None

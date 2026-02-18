@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx pydantic pydantic
 COPY src/ ./src/
 COPY run_proxy.py ./
 COPY run_glm_proxy.py ./
+COPY live_conversations.py ./
 
 # Add src to Python path for proper imports
 ENV PYTHONPATH=/app/src:$PYTHONPATH

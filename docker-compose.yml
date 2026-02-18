@@ -37,6 +37,26 @@ services:
       retries: 3
       start_period: 10s
     command: ["python", "run_glm_proxy.py", "--host", "0.0.0.0", "--port", "4343"]
+    volumes:
+      - ./.cache:/app/.cache
+
+  log-visualizer:
+    build: .
+    container_name: log-visualizer
+    ports:
+      - "4446:4446"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./.cache:/app/.cache
+    restart: unless-stopped
+    command: ["python", "live_conversations.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4446/').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   copilot-data:
