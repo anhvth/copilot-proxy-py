@@ -6,6 +6,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import Request
+from fastapi.responses import JSONResponse
 
 from .base import BaseCachingProxy
 from .copilot import CopilotProxy
@@ -32,6 +33,41 @@ class UnifiedProxyGateway(BaseCachingProxy):
             logger_name="unified_proxy",
         )
         self._log_startup()
+
+    async def _fetch_models(self, proxy: BaseCachingProxy, api_type: str):
+        """Fetch available models from the upstream API."""
+        import httpx
+
+        base_url = proxy.openai_upstream if api_type == "openai" else proxy.anthropic_upstream
+        models_url = f"{base_url}/models"
+
+        # Build headers with provider-specific auth
+        headers = {"Accept": "application/json"}
+        try:
+            headers = await proxy.provider_headers(request=None, headers=headers)
+        except Exception as e:
+            self.logger.error(f"Failed to get auth headers: {e}")
+            return JSONResponse(
+                content={"error": {"message": f"Authentication failed: {e}", "type": "auth_error"}},
+                status_code=401,
+            )
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(models_url, headers=headers)
+                if resp.status_code != 200:
+                    self.logger.warning(f"Models request failed: {resp.status_code} - {resp.text[:500]}")
+                    return JSONResponse(
+                        content={"error": {"message": f"Upstream error: {resp.status_code}", "type": "upstream_error", "details": resp.text[:500]}},
+                        status_code=resp.status_code,
+                    )
+                return JSONResponse(content=resp.json())
+        except httpx.RequestError as e:
+            self.logger.error(f"Request error fetching models: {e}")
+            return JSONResponse(
+                content={"error": {"message": f"Request failed: {e}", "type": "network_error"}},
+                status_code=502,
+            )
 
     def _ensure_required_credentials(self) -> None:
         self._ensure_github_token()
@@ -132,7 +168,11 @@ class UnifiedProxyGateway(BaseCachingProxy):
         self.logger.info("Unified AI Proxy Gateway")
         self.logger.info("=" * 50)
         self.logger.info(f"GitHub Copilot: /{self.gh_copilot_prefix}/{{openai,anthropic}}/{{path}}")
+        self.logger.info(f"                /{self.gh_copilot_prefix}/models-openai")
+        self.logger.info(f"                /{self.gh_copilot_prefix}/models-anthropic")
         self.logger.info(f"Z.AI:            /{self.zai_prefix}/{{openai,anthropic}}/{{path}}")
+        self.logger.info(f"                /{self.zai_prefix}/models-openai")
+        self.logger.info(f"                /{self.zai_prefix}/models-anthropic")
         self.logger.info(f"Cache directory:  {self.cache_dir}")
         self.logger.info("=" * 50)
 
@@ -144,8 +184,12 @@ class UnifiedProxyGateway(BaseCachingProxy):
                 "routes": [
                     f"/{self.gh_copilot_prefix}/openai/{{path}}",
                     f"/{self.gh_copilot_prefix}/anthropic/{{path}}",
+                    f"/{self.gh_copilot_prefix}/models-openai",
+                    f"/{self.gh_copilot_prefix}/models-anthropic",
                     f"/{self.zai_prefix}/openai/{{path}}",
                     f"/{self.zai_prefix}/anthropic/{{path}}",
+                    f"/{self.zai_prefix}/models-openai",
+                    f"/{self.zai_prefix}/models-anthropic",
                 ],
             }
 
@@ -166,6 +210,26 @@ class UnifiedProxyGateway(BaseCachingProxy):
         @self.app.api_route(f"/{self.zai_prefix}/anthropic/{{path:path}}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
         async def zai_anthropic(request: Request, path: str):
             return await self.zai._proxy(request, path, self.zai.anthropic_upstream)
+
+        @self.app.get(f"/{self.gh_copilot_prefix}/models-openai")
+        async def gh_copilot_models_openai():
+            """List available OpenAI-compatible models from GitHub Copilot."""
+            return await self._fetch_models(self.gh_copilot, "openai")
+
+        @self.app.get(f"/{self.gh_copilot_prefix}/models-anthropic")
+        async def gh_copilot_models_anthropic():
+            """List available Anthropic-compatible models from GitHub Copilot."""
+            return await self._fetch_models(self.gh_copilot, "anthropic")
+
+        @self.app.get(f"/{self.zai_prefix}/models-openai")
+        async def zai_models_openai():
+            """List available OpenAI-compatible models from Z.AI."""
+            return await self._fetch_models(self.zai, "openai")
+
+        @self.app.get(f"/{self.zai_prefix}/models-anthropic")
+        async def zai_models_anthropic():
+            """List available Anthropic-compatible models from Z.AI."""
+            return await self._fetch_models(self.zai, "anthropic")
 
 def main() -> None:
     _cfg = load_config()
