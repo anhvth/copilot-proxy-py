@@ -18,6 +18,7 @@ services:
       - copilot-data:/app/copilot-data
       - ./.env:/app/.env:ro
       - ${HOME}/.cache/conversations_proxy_cache:/app/.cache
+      - uv-cache:/root/.cache/uv
     restart: unless-stopped
     command: ["python", "run.py", "config.yaml"]
     healthcheck:
@@ -34,8 +35,10 @@ services:
       - "4446:4446"
     environment:
       - PYTHONUNBUFFERED=1
+      - CACHE_DIR=/app/.cache
     volumes:
       - ${HOME}/.cache/conversations_proxy_cache:/app/.cache
+      - uv-cache:/root/.cache/uv
     restart: unless-stopped
     command: ["python", "live_conversations.py"]
     healthcheck:
@@ -47,3 +50,4 @@ services:
 
 volumes:
   copilot-data:
+  uv-cache:

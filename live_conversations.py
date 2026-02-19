@@ -21,7 +21,7 @@ from pydantic import BaseModel
 # Configuration
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "4446"))
-LOG_DIR = Path(".cache")
+LOG_DIR = Path(os.getenv("CACHE_DIR", Path.home() / ".cache" / "conversations_proxy_cache"))
 
 app = FastAPI(title="Live Conversations")
 
@@ -127,6 +127,7 @@ def summarize_log(filepath: Path) -> LogSummary:
         model = payload.get("model")
         timestamp = datetime.fromtimestamp(filepath.stat().st_mtime).isoformat()
         has_error = isinstance(message.get("content"), str) and message["content"].startswith("Error")
+        has_reasoning = bool(message.get("reasoning_content") or message.get("reasoning"))
         return LogSummary(
             filename=filepath.name,
             path=str(filepath.relative_to(LOG_DIR)),
@@ -138,7 +139,7 @@ def summarize_log(filepath: Path) -> LogSummary:
             preview=extract_preview(payload),
             model=model,
             total_tokens=None,
-            has_reasoning=False,
+            has_reasoning=has_reasoning,
             has_error=has_error,
         )
 
@@ -466,6 +467,18 @@ HTML_TEMPLATE = """
                         <!-- Assistant Message -->
                         <div v-else-if="msg.role === 'assistant'" class="msg-assistant p-3 rounded-lg">
                             <div class="text-green-400 text-xs font-bold uppercase mb-2 px-1.5 py-0.5 bg-green-900/50 rounded inline-block">Assistant</div>
+                            <!-- Inline reasoning block -->
+                            <div v-if="msg.reasoning_content" class="msg-reasoning p-2 rounded mb-2">
+                                <div class="flex items-center justify-between cursor-pointer" @click="toggleCollapse('msg-reasoning-' + idx)">
+                                    <div class="flex items-center gap-2">
+                                        <span class="text-purple-400 text-xs font-bold uppercase px-1.5 py-0.5 bg-purple-900/50 rounded">🧠 Reasoning</span>
+                                        <span class="text-gray-500 text-xs">{{ msg.reasoning_content.length.toLocaleString() }} chars</span>
+                                    </div>
+                                    <span class="text-gray-500 text-xs">{{ isCollapsed('msg-reasoning-' + idx) ? '▶ Show' : '▼ Hide' }}</span>
+                                </div>
+                                <div v-if="!isCollapsed('msg-reasoning-' + idx)" class="mt-2 text-purple-200 text-sm prose prose-invert max-w-none" v-html="renderMarkdown(msg.reasoning_content)"></div>
+                                <div v-else class="mt-1 text-gray-500 text-xs truncate">{{ msg.reasoning_content.substring(0, 200) }}...</div>
+                            </div>
                             <!-- Tool calls -->
                             <div v-if="msg.tool_calls && msg.tool_calls.length" class="space-y-2">
                                 <div v-if="msg.content" class="text-gray-100 prose prose-invert max-w-none text-sm mb-2" v-html="renderMarkdown(msg.content)"></div>
@@ -730,6 +743,7 @@ HTML_TEMPLATE = """
                                 type: 'text',
                                 content: msg.content || '',
                                 tool_calls: msg.tool_calls,
+                                reasoning_content: msg.reasoning_content || msg.reasoning || null,
                             });
                         } else if (role === 'tool') {
                             messages.push({
@@ -748,7 +762,7 @@ HTML_TEMPLATE = """
                             // user or assistant without tool_calls
                             const content = msg.content;
                             if (typeof content === 'string') {
-                                messages.push({ role, type: 'text', content });
+                                messages.push({ role, type: 'text', content, reasoning_content: msg.reasoning_content || msg.reasoning || null });
                             } else if (Array.isArray(content)) {
                                 // Multi-modal content (Anthropic format)
                                 for (const item of content) {
@@ -773,9 +787,17 @@ HTML_TEMPLATE = """
 
             // Extract reasoning content
             const reasoningContent = computed(() => {
-                if (!logDetail.value?.content?.response?.body) return '';
-                const body = logDetail.value.content.response.body;
-                return body.full_reasoning_content || '';
+                const content = logDetail.value?.content;
+                if (!content) return '';
+                // New format: response.message.reasoning_content
+                if (content.response?.message?.reasoning_content) {
+                    return content.response.message.reasoning_content;
+                }
+                // Old format: response.body.full_reasoning_content
+                if (content.response?.body) {
+                    return content.response.body.full_reasoning_content || '';
+                }
+                return '';
             });
 
             // Extract response text

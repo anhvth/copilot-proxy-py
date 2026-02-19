@@ -1,12 +1,16 @@
 FROM python:3.11-slim
 
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 WORKDIR /app
 
-# Install dependencies
+# Install dependencies first (rarely changes) — cached layer
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx pydantic pydantic-settings sse-starlette typer loguru apscheduler python-dotenv rich portalocker PyYAML
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-install-project
 
-# Copy application code
+# Copy application code (changes frequently)
 COPY src/ ./src/
 COPY config.yaml ./
 COPY run.py ./
@@ -14,6 +18,7 @@ COPY live_conversations.py ./
 
 # Add src to Python path for proper imports
 ENV PYTHONPATH=/app/src:$PYTHONPATH
+ENV PATH=/app/.venv/bin:$PATH
 
 # Create copilot-data directory for shared token storage
 RUN mkdir -p /app/copilot-data
