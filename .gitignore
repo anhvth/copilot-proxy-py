@@ -86,3 +86,4 @@ build/
 .playwright-mcp/
 plan/
 .chainlit
+chainlit.md

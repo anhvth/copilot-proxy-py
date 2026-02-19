@@ -4,10 +4,12 @@ WORKDIR /app
 
 # Install dependencies
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx pydantic pydantic-settings sse-starlette typer loguru apscheduler python-dotenv rich portalocker
+RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx pydantic pydantic-settings sse-starlette typer loguru apscheduler python-dotenv rich portalocker PyYAML
 
 # Copy application code
 COPY src/ ./src/
+COPY config.yaml ./
+COPY run.py ./
 COPY run_proxy.py ./
 COPY run_glm_proxy.py ./
 COPY live_conversations.py ./

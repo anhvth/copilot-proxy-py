@@ -1,0 +1,21 @@
+server:
+  host: "0.0.0.0"
+  port: 4343
+
+routes:
+  gh_copilot_prefix: "gh-copilot"
+  zai_prefix: "zai"
+
+providers:
+  copilot:
+    openai_upstream: "https://api.githubcopilot.com"
+    anthropic_upstream: "https://api.anthropic.com"
+    cache_dir: ".cache/copilot"
+    github_token: ""
+
+  zai:
+    openai_upstream: "https://api.z.ai/api/coding/paas/v4"
+    anthropic_upstream: "https://api.z.ai/api/anthropic"
+    cache_dir: ".cache/Z_AI"
+    api_key: ""
+    glm_version: "glm-4.5"
