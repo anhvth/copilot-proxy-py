@@ -9,7 +9,7 @@ routes:
 providers:
   copilot:
     openai_upstream: "https://api.githubcopilot.com"
-    anthropic_upstream: "https://api.anthropic.com"
+    anthropic_upstream: "https://api.githubcopilot.com"
     cache_dir: ".cache/copilot"
     github_token: ""
 

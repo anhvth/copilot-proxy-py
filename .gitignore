@@ -88,3 +88,4 @@ plan/
 .chainlit
 chainlit.md
 endpoints.json
+reference_code

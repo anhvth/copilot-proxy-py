@@ -13,12 +13,19 @@ class CopilotProxy(BaseCachingProxy):
         settings = settings or {}
         super().__init__(
             title="Copilot Caching Proxy",
-            openai_upstream=os.environ.get("OPENAI_UPSTREAM", settings.get("openai_upstream", "https://api.githubcopilot.com")),
-            anthropic_upstream=os.environ.get("ANTHROPIC_UPSTREAM", settings.get("anthropic_upstream", "https://api.anthropic.com")),
+            openai_upstream=os.environ.get(
+                "COPILOT_OPENAI_UPSTREAM",
+                settings.get("openai_upstream", "https://api.githubcopilot.com"),
+            ),
+            anthropic_upstream=os.environ.get(
+                "COPILOT_ANTHROPIC_UPSTREAM",
+                settings.get("anthropic_upstream", "https://api.githubcopilot.com"),
+            ),
             cache_dir=Path(settings.get("cache_dir", ".cache/copilot")),
             logger_name="copilot_proxy",
         )
         self.github_token = os.environ.get("GITHUB_TOKEN", str(settings.get("github_token", ""))).strip()
+        self._token_endpoints: dict = {}
 
     async def _ensure_copilot_token(self) -> str:
         github_token = self.github_token
@@ -67,6 +74,7 @@ class CopilotProxy(BaseCachingProxy):
                     }
                 },
             )
+        self._token_endpoints = data.get("endpoints", {})
         return token
 
     async def provider_headers(self, request: Request, headers: dict[str, str]) -> dict[str, str]:

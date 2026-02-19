@@ -15,13 +15,19 @@ class GLMProxy(BaseCachingProxy):
             openai_upstream=os.environ.get(
                 "Z_AI_OPENAI_URL",
                 os.environ.get(
+                    "Z_AI_OPENAI_UPSTREAM",
+                    os.environ.get(
                     "OPENAI_UPSTREAM",
                     os.environ.get("GLM_UPSTREAM_BASE", settings.get("openai_upstream", "https://api.z.ai/api/coding/paas/v4")),
+                    ),
                 ),
             ),
             anthropic_upstream=os.environ.get(
-                "ANTHROPIC_UPSTREAM",
-                os.environ.get("ANTHROPIC_UPSTREAM_BASE", settings.get("anthropic_upstream", "https://api.z.ai/api/anthropic")),
+                "Z_AI_ANTHROPIC_UPSTREAM",
+                os.environ.get(
+                    "ANTHROPIC_UPSTREAM",
+                    os.environ.get("ANTHROPIC_UPSTREAM_BASE", settings.get("anthropic_upstream", "https://api.z.ai/api/anthropic")),
+                ),
             ),
             cache_dir=Path(settings.get("cache_dir", ".cache/Z_AI")),
             logger_name="glm_proxy",
