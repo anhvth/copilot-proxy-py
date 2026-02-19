@@ -21,7 +21,7 @@ from pydantic import BaseModel
 # Configuration
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "4446"))
-LOG_DIR = Path(".cache/logs")
+LOG_DIR = Path(".cache")
 
 app = FastAPI(title="Live Conversations")
 
@@ -63,7 +63,7 @@ def get_log_files(limit: int = 100) -> list[Path]:
     if not LOG_DIR.exists():
         return []
 
-    log_files = list(LOG_DIR.rglob("*.json"))
+    log_files = [f for f in LOG_DIR.rglob("*.json") if f.name != ".index.json"]
     log_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
     return log_files[:limit]
 
@@ -118,6 +118,31 @@ def summarize_log(filepath: Path) -> LogSummary:
     """Create a summary of a log file."""
     content = parse_log_file(filepath)
 
+    if "payload" in content:
+        # New format: {"payload": {model, messages, system, ...}, "response": {"message": {role, content}}}
+        from datetime import datetime
+        payload = content.get("payload", {})
+        response = content.get("response", {})
+        message = response.get("message", {})
+        model = payload.get("model")
+        timestamp = datetime.fromtimestamp(filepath.stat().st_mtime).isoformat()
+        has_error = isinstance(message.get("content"), str) and message["content"].startswith("Error")
+        return LogSummary(
+            filename=filepath.name,
+            path=str(filepath.relative_to(LOG_DIR)),
+            timestamp=timestamp,
+            method="POST",
+            url=None,
+            status_code=200,
+            duration=None,
+            preview=extract_preview(payload),
+            model=model,
+            total_tokens=None,
+            has_reasoning=False,
+            has_error=has_error,
+        )
+
+    # Old format: {"request": {...}, "response": {"body": {...}}}
     request = content.get("request", {})
     response = content.get("response", {})
     response_body = response.get("body", {})
@@ -172,7 +197,7 @@ def search_logs(query: str, limit: int = 100) -> list[Path]:
     if not LOG_DIR.exists():
         return []
 
-    log_files = list(LOG_DIR.rglob("*.json"))
+    log_files = [f for f in LOG_DIR.rglob("*.json") if f.name != ".index.json"]
     matches = []
 
     for filepath in log_files:
@@ -669,10 +694,30 @@ HTML_TEMPLATE = """
 
             // Extract all chat messages with proper roles
             const chatMessages = computed(() => {
-                if (!logDetail.value?.content?.request?.body) return [];
+                const content = logDetail.value?.content;
+                if (!content) return [];
 
-                const body = logDetail.value.content.request.body;
+                // New format: content.payload has messages + optional system
+                // Old format: content.request.body has messages
+                let body = null;
+                let systemPrompt = null;
+                if (content.payload) {
+                    body = content.payload;
+                    if (body.system) {
+                        systemPrompt = typeof body.system === 'string' ? body.system : JSON.stringify(body.system);
+                    }
+                } else if (content.request?.body) {
+                    body = content.request.body;
+                } else {
+                    return [];
+                }
+
                 const messages = [];
+
+                // Prepend system from payload.system (new format)
+                if (systemPrompt) {
+                    messages.push({ role: 'system', type: 'text', content: systemPrompt });
+                }
 
                 // OpenAI messages format
                 if (body.messages && Array.isArray(body.messages)) {
@@ -735,9 +780,21 @@ HTML_TEMPLATE = """
 
             // Extract response text
             const responseText = computed(() => {
-                if (!logDetail.value?.content?.response?.body) return '';
-                const body = logDetail.value.content.response.body;
+                if (!logDetail.value?.content?.response) return '';
+                const response = logDetail.value.content.response;
 
+                // New format: response.message.content
+                if (response.message) {
+                    const content = response.message.content;
+                    if (typeof content === 'string') return content;
+                    if (Array.isArray(content)) {
+                        return content.filter(c => c.type === 'text').map(c => c.text).join('\\n\\n');
+                    }
+                }
+
+                // Old format: response.body.*
+                const body = response.body;
+                if (!body) return '';
                 if (body.full_response_text) return body.full_response_text;
                 if (body.choices?.[0]?.message?.content) return body.choices[0].message.content;
                 if (body.choices?.[0]?.text) return body.choices[0].text;
@@ -753,7 +810,7 @@ HTML_TEMPLATE = """
                 return JSON.stringify(body, null, 2);
             });
 
-            // SSE chunks info
+            // SSE chunks info (old format only)
             const sseChunks = computed(() => {
                 const body = logDetail.value?.content?.response?.body;
                 return body?._sse_chunks || null;
@@ -763,6 +820,14 @@ HTML_TEMPLATE = """
             const metadata = computed(() => {
                 if (!logDetail.value?.content) return null;
                 const content = logDetail.value.content;
+
+                // New format
+                if (content.payload) {
+                    const model = content.payload.model || null;
+                    return { model, promptTokens: null, completionTokens: null, totalTokens: null, cachedTokens: null };
+                }
+
+                // Old format
                 const respBody = content.response?.body || {};
                 const reqBody = content.request?.body || {};
                 const lastChunk = respBody.last || {};
