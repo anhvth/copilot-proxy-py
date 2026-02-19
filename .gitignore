@@ -85,3 +85,4 @@ build/
 .env
 .playwright-mcp/
 plan/
+.chainlit
