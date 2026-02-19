@@ -92,3 +92,55 @@ class CopilotProxy(BaseCachingProxy):
             }
         )
         return headers
+
+    @staticmethod
+    def _is_anthropic_messages_path(path: str) -> bool:
+        normalized = path.lstrip("/")
+        return normalized.startswith("v1/messages")
+
+    @staticmethod
+    def _normalize_cache_control(value: object) -> dict[str, str] | None:
+        if not isinstance(value, dict):
+            return None
+
+        if "ephemeral" in value:
+            return {"type": "ephemeral"}
+        if "persistent" in value:
+            return {"type": "persistent"}
+
+        cache_type = value.get("type")
+        if isinstance(cache_type, str):
+            normalized = cache_type.strip().lower()
+            if normalized in {"ephemeral", "persistent"}:
+                return {"type": normalized}
+
+        return None
+
+    @classmethod
+    def _normalize_cache_controls(cls, payload: dict) -> dict:
+        def _walk(value: object) -> object:
+            if isinstance(value, list):
+                return [_walk(item) for item in value]
+            if isinstance(value, dict):
+                normalized: dict[str, object] = {}
+                for key, item in value.items():
+                    if key == "cache_control":
+                        normalized_cache = cls._normalize_cache_control(item)
+                        if normalized_cache is not None:
+                            normalized[key] = normalized_cache
+                        continue
+                    normalized[key] = _walk(item)
+                return normalized
+            return value
+
+        walked = _walk(payload)
+        return walked if isinstance(walked, dict) else payload
+
+    def transform_request_body(self, *, path: str, body_dict: dict) -> dict:
+        if not self._is_anthropic_messages_path(path):
+            return body_dict
+
+        normalized = self._normalize_cache_controls(body_dict)
+        if normalized != body_dict:
+            self.logger.info("Normalized Anthropic cache_control payload for Copilot compatibility")
+        return normalized

@@ -86,6 +86,10 @@ class BaseCachingProxy:
     async def provider_headers(self, request: Request, headers: dict[str, str]) -> dict[str, str]:
         return headers
 
+    def transform_request_body(self, *, path: str, body_dict: dict) -> dict:
+        """Allow provider-specific request normalization before upstream forwarding."""
+        return body_dict
+
     def _log_exchange(
         self,
         method: str,
@@ -303,11 +307,16 @@ class BaseCachingProxy:
         try:
             headers = await self.provider_headers(request, headers)
         except ProxyAuthError as e:
-            self.logger.error(f"Auth error for {method} {path}: {e.body.get('error', {}).get('message', 'Unknown auth error')}")
+            self.logger.error(
+                f"Auth error for {request.method} {path}: "
+                f"{e.body.get('error', {}).get('message', 'Unknown auth error')}"
+            )
             self._log_exchange(request.method, path, status=e.status_code)
             return Response(content=json.dumps(e.body), status_code=e.status_code, media_type="application/json")
         except Exception as e:
-            self.logger.error(f"Configuration error for {method} {path}: {type(e).__name__}: {e}")
+            self.logger.error(
+                f"Configuration error for {request.method} {path}: {type(e).__name__}: {e}"
+            )
             self._log_exchange(request.method, path, status=500)
             body = {"error": {"message": f"Proxy configuration error: {e}", "type": "configuration_error"}}
             return Response(content=json.dumps(body), status_code=500, media_type="application/json")
@@ -317,6 +326,8 @@ class BaseCachingProxy:
             body_dict = json.loads(body_bytes) if body_bytes else {}
         except json.JSONDecodeError:
             body_dict = None
+        else:
+            body_dict = self.transform_request_body(path=path, body_dict=body_dict)
 
         cache_file = None
         stream_cache_file = None
