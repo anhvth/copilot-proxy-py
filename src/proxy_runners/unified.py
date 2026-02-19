@@ -31,6 +31,7 @@ class UnifiedProxyGateway(BaseCachingProxy):
             cache_dir=Path(".cache/unified"),
             logger_name="unified_proxy",
         )
+        self._log_startup()
 
     def _ensure_required_credentials(self) -> None:
         self._ensure_github_token()
@@ -125,6 +126,15 @@ class UnifiedProxyGateway(BaseCachingProxy):
         if not updated:
             lines.append(f"{key}={value}")
         env_path.write_text("\n".join(lines).rstrip() + "\n")
+
+    def _log_startup(self) -> None:
+        self.logger.info("=" * 50)
+        self.logger.info("Unified AI Proxy Gateway")
+        self.logger.info("=" * 50)
+        self.logger.info(f"GitHub Copilot: /{self.gh_copilot_prefix}/{{openai,anthropic}}/{{path}}")
+        self.logger.info(f"Z.AI:            /{self.zai_prefix}/{{openai,anthropic}}/{{path}}")
+        self.logger.info(f"Cache directory:  {self.cache_dir}")
+        self.logger.info("=" * 50)
 
     def _register_routes(self) -> None:
         @self.app.get("/health")

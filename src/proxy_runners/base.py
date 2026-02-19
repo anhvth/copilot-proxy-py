@@ -20,6 +20,21 @@ class ProxyAuthError(Exception):
 
 
 class BaseCachingProxy:
+    @staticmethod
+    def _setup_logger(name: str) -> logging.Logger:
+        logger = logging.getLogger(name)
+        if logger.handlers:
+            return logger
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S"
+        ))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        return logger
+
     def __init__(
         self,
         *,
@@ -42,8 +57,7 @@ class BaseCachingProxy:
         self._index_file.touch(exist_ok=True)
         self._index_lock_file.touch(exist_ok=True)
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(120.0))
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
-        self.logger = logging.getLogger(logger_name)
+        self.logger = self._setup_logger(logger_name)
         self.app = FastAPI(title=title)
         self._register_routes()
 
@@ -82,19 +96,17 @@ class BaseCachingProxy:
         cached: bool = False,
         cache_file: Path | None = None,
     ) -> None:
-        self.logger.info(
-            json.dumps(
-                {
-                    "method": method,
-                    "path": path,
-                    "status_code": status,
-                    "stream": stream,
-                    "cached": cached,
-                    "cache_file": str(cache_file) if cache_file else None,
-                },
-                ensure_ascii=False,
-            )
-        )
+        parts = [f"{method} {path}"]
+        if status is not None:
+            status_emoji = "✓" if 200 <= status < 300 else ("✗" if status >= 400 else "?")
+            parts.append(f"{status_emoji} {status}")
+        if cached:
+            parts.append("(cached)")
+        if stream:
+            parts.append("[stream]")
+        if cache_file:
+            parts.append(f"→ {cache_file.name}")
+        self.logger.info(" ".join(parts))
 
     def _get_cache_key(self, path: str, body_dict: dict) -> str:
         body_dict.pop("stream", None)
@@ -158,7 +170,7 @@ class BaseCachingProxy:
         model = self._sanitize_name(str(body_dict.get("model", "unknown")), "unknown")
         count = self._next_cache_count()
         suffix = ".stream.json" if stream else ".json"
-        return self.cache_dir / f"{endpoint}-{model}-{count}{suffix}"
+        return self.cache_dir / f"{count}-model-{model}-endpoint-{endpoint}{suffix}"
 
     @staticmethod
     def _response_headers(raw_headers: httpx.Headers) -> dict[str, str]:
@@ -291,11 +303,13 @@ class BaseCachingProxy:
         try:
             headers = await self.provider_headers(request, headers)
         except ProxyAuthError as e:
+            self.logger.error(f"Auth error for {method} {path}: {e.body.get('error', {}).get('message', 'Unknown auth error')}")
             self._log_exchange(request.method, path, status=e.status_code)
             return Response(content=json.dumps(e.body), status_code=e.status_code, media_type="application/json")
         except Exception as e:
-            body = {"error": {"message": f"Proxy configuration error: {e}", "type": "configuration_error"}}
+            self.logger.error(f"Configuration error for {method} {path}: {type(e).__name__}: {e}")
             self._log_exchange(request.method, path, status=500)
+            body = {"error": {"message": f"Proxy configuration error: {e}", "type": "configuration_error"}}
             return Response(content=json.dumps(body), status_code=500, media_type="application/json")
 
         body_bytes = await request.body()
@@ -344,8 +358,25 @@ class BaseCachingProxy:
             content = body_bytes
 
         if is_stream_request:
-            req = self.client.build_request(request.method, url, content=content, headers=headers)
-            upstream = await self.client.send(req, stream=True)
+            try:
+                req = self.client.build_request(request.method, url, content=content, headers=headers)
+                upstream = await self.client.send(req, stream=True)
+            except httpx.RemoteProtocolError as e:
+                self.logger.error(f"Network error for {request.method} {path}: {e}")
+                self._log_exchange(request.method, path, status=502)
+                return Response(
+                    content=json.dumps({"error": {"message": f"Upstream connection failed: {e}", "type": "network_error"}}),
+                    status_code=502,
+                    media_type="application/json"
+                )
+            except httpx.RequestError as e:
+                self.logger.error(f"Request error for {request.method} {path}: {type(e).__name__}: {e}")
+                self._log_exchange(request.method, path, status=502)
+                return Response(
+                    content=json.dumps({"error": {"message": f"Request failed: {e}", "type": "network_error"}}),
+                    status_code=502,
+                    media_type="application/json"
+                )
             stream_chunks: list[bytes] = []
 
             async def _iter_and_cache():
@@ -372,6 +403,8 @@ class BaseCachingProxy:
                         stream=True,
                         cache_file=stream_cache_file if upstream.status_code == 200 else None,
                     )
+                    if upstream.status_code >= 400:
+                        self.logger.warning(f"Upstream error {upstream.status_code} for {request.method} {path}")
 
             return StreamingResponse(
                 _iter_and_cache(),
@@ -380,8 +413,25 @@ class BaseCachingProxy:
                 media_type=upstream.headers.get("content-type"),
             )
 
-        req = self.client.build_request(request.method, url, content=content, headers=headers)
-        upstream = await self.client.send(req)
+        try:
+            req = self.client.build_request(request.method, url, content=content, headers=headers)
+            upstream = await self.client.send(req)
+        except httpx.RemoteProtocolError as e:
+            self.logger.error(f"Network error for {request.method} {path}: {e}")
+            self._log_exchange(request.method, path, status=502)
+            return Response(
+                content=json.dumps({"error": {"message": f"Upstream connection failed: {e}", "type": "network_error"}}),
+                status_code=502,
+                media_type="application/json"
+            )
+        except httpx.RequestError as e:
+            self.logger.error(f"Request error for {request.method} {path}: {type(e).__name__}: {e}")
+            self._log_exchange(request.method, path, status=502)
+            return Response(
+                content=json.dumps({"error": {"message": f"Request failed: {e}", "type": "network_error"}}),
+                status_code=502,
+                media_type="application/json"
+            )
 
         if upstream.status_code == 200 and cache_file:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -394,6 +444,8 @@ class BaseCachingProxy:
             status=upstream.status_code,
             cache_file=cache_file if upstream.status_code == 200 else None,
         )
+        if upstream.status_code >= 400:
+            self.logger.warning(f"Upstream error {upstream.status_code} for {request.method} {path}")
 
         return Response(
             content=upstream.content,
